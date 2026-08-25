@@ -80,10 +80,16 @@ def emb(title: str, desc: str = '', color: int = 0x5865F2) -> discord.Embed:
     return e
 
 
+def is_owner(ctx: commands.Context) -> bool:
+    # Only the configured FROXX owner may grant/revoke FROXX admin access.
+    # Discord server Administrator permission does NOT grant FROXX admin access.
+    return bool(OWNER_ID and ctx.author.id == OWNER_ID)
+
+
 def is_admin(ctx: commands.Context) -> bool:
     # FROXX admin access is independent from Discord's Administrator permission.
     # The configured owner is always an admin; additional admins are persistent.
-    return bool(ctx.author.id == OWNER_ID or ctx.author.id in getattr(bot, 'admin_ids', set()))
+    return bool(is_owner(ctx) or ctx.author.id in getattr(bot, 'admin_ids', set()))
 
 
 # ---------------------------------------------------------------------------
@@ -442,7 +448,7 @@ async def game_payout(uid: int, amount: int, label: str):
 
 
 class HelpPanel(discord.ui.View):
-    """Four-button help hub. Button results are ephemeral, so only the clicker sees them."""
+    """Three-button public help hub. Admin controls are intentionally hidden."""
     def __init__(self):
         super().__init__(timeout=180)
 
@@ -499,26 +505,8 @@ class HelpPanel(discord.ui.View):
             '`fx trade @user` — Start a player trade.',
         ], 0x5865F2)
 
-    @discord.ui.button(label='🛡️ Admin + Utility', style=discord.ButtonStyle.secondary, row=1)
-    async def admin_utility(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id == OWNER_ID or interaction.user.id in getattr(bot, 'admin_ids', set()):
-            lines = [
-                '`fx admin` — Open the admin command list.',
-                '`fx admin addadmin @user` — Make a user a FROXX admin.',
-                '`fx admin removeadmin @user` — Remove FROXX admin access.',
-                '`fx admin admins` — List FROXX admins.',
-                '`fx admin add @user <amount>` — Give wallet coins.',
-                '`fx admin remove @user <amount>` — Remove wallet coins.',
-                '`fx admin set @user <amount>` — Set wallet coins.',
-                '`fx admin reset @user` — Reset an account.',
-                '`fx admin giveitem @user <item> [qty]` — Give items.',
-                '`fx admin removeitem @user <item> [qty]` — Remove items.',
-                '`fx admin inspect @user` — Inspect an account.',
-                '`fx admin reloadshop` — Re-seed the catalog.',
-            ]
-            await self._show(interaction, '🛡️ ADMIN COMMANDS', lines, 0x9B59B6)
-        else:
-            await interaction.response.send_message('🔒 This section is only for FROXX admins.', ephemeral=True)
+    # Admin commands are intentionally omitted from the public help UI.
+    # Admins can use `fx admin` directly; this keeps normal players' help clean.
 
 
 @bot.command(name='help', aliases=['h'])
@@ -528,12 +516,11 @@ async def fx_help(ctx):
         'Pick one button below. The command list you open is **private to you**.\n\n'
         '🪙 **Coin + Free** — simple money commands.\n'
         '🎰 **Games + Stats** — games and your W/L record.\n'
-        '🛒 **Shop + Create** — collect, buy and sell loot.\n'
-        '🛡️ **Admin + Utility** — admin tools if you have access.\n\n'
+        '🛒 **Shop + Create** — collect, buy and sell loot.\n\n'
         '**Every command starts with `fx`.**\n'
         '**Commands ignore capital letters**, so `fx CF 100 HEAD` works too.',
         0xF1C40F)
-    e.set_footer(text='FROXX • Click a button • Help panel stays open for 3 minutes')
+    e.set_footer(text='FROXX • Public help • Admin commands are hidden from this panel')
     await safe_send(ctx, embed=e, view=HelpPanel())
 
 
@@ -1281,13 +1268,22 @@ async def mines(ctx, bet: int, mine_count: int = 5):
 @bot.group(name='admin', invoke_without_command=True)
 @commands.check(is_admin)
 async def admin(ctx):
-    await safe_send(ctx, embed=emb('🛡️ ADMIN', '`fx admin add @user amount`\n`fx admin remove @user amount`\n`fx admin addadmin @user` / `removeadmin @user`\n`fx admin set @user amount`\n`fx admin reset @user`\n`fx admin giveitem @user item qty`\n`fx admin removeitem @user item qty`\n`fx admin inspect @user`\n`fx admin reloadshop`'))
+    await safe_send(ctx, embed=emb('🛡️ ADMIN',
+        '`fx admin add @user amount`\n'
+        '`fx admin remove @user amount`\n'
+        '`fx admin addadmin @user` / `removeadmin @user` *(owner only)*\n'
+        '`fx admin admins`\n'
+        '`fx admin set @user amount`\n'
+        '`fx admin reset @user`\n'
+        '`fx admin giveitem @user item qty`\n'
+        '`fx admin removeitem @user item qty`\n'
+        '`fx admin inspect @user`\n'
+        '`fx admin reloadshop`'))
 
 
 @admin.command(name='addadmin', aliases=['grantadmin','promote'])
+@commands.check(is_owner)
 async def admin_addadmin(ctx, member: discord.Member):
-    if ctx.author.id != OWNER_ID:
-        raise commands.CheckFailure('Only the configured owner can grant FROXX admin access.')
     if member.bot:
         raise ValueError('Bots cannot be FROXX economy admins.')
     await bot.db.ensure_admin(member.id, ctx.author.id)
@@ -1296,9 +1292,8 @@ async def admin_addadmin(ctx, member: discord.Member):
 
 
 @admin.command(name='removeadmin', aliases=['revokeadmin','demote'])
+@commands.check(is_owner)
 async def admin_removeadmin(ctx, member: discord.Member):
-    if ctx.author.id != OWNER_ID:
-        raise commands.CheckFailure('Only the configured owner can revoke FROXX admin access.')
     if member.id == OWNER_ID:
         raise ValueError('The configured owner cannot be removed.')
     await bot.db.remove_admin(member.id)
@@ -1307,6 +1302,7 @@ async def admin_removeadmin(ctx, member: discord.Member):
 
 
 @admin.command(name='admins', aliases=['adminlist','listadmins'])
+@commands.check(is_admin)
 async def admin_admins(ctx):
     rows = await bot.db.list_admins_detailed()
     if not rows:
@@ -1317,11 +1313,13 @@ async def admin_admins(ctx):
 
 
 @admin.command(name='add')
+@commands.check(is_admin)
 async def admin_add(ctx, member: discord.Member, amount: int):
     if amount<=0: raise ValueError('Amount must be positive.')
     await bot.db.economy_tx(member.id,'admin_add',wallet_delta=amount,tx_id=secrets.token_hex(16)); await safe_send(ctx, f'✅ Added **{fmt(amount)} {COIN}** to {member.mention}.')
 
 @admin.command(name='remove')
+@commands.check(is_admin)
 async def admin_remove(ctx, member: discord.Member, amount: int):
     if amount<=0: raise ValueError('Amount must be positive.')
     a=await account(member.id)
@@ -1329,6 +1327,7 @@ async def admin_remove(ctx, member: discord.Member, amount: int):
     await bot.db.economy_tx(member.id,'admin_remove',wallet_delta=-amount,tx_id=secrets.token_hex(16)); await safe_send(ctx, f'✅ Removed **{fmt(amount)} {COIN}** from {member.mention}.')
 
 @admin.command(name='set')
+@commands.check(is_admin)
 async def admin_set(ctx, member: discord.Member, amount: int):
     if amount<0: raise ValueError('Amount cannot be negative.')
     a=await account(member.id); delta=amount-a.wallet
@@ -1336,24 +1335,29 @@ async def admin_set(ctx, member: discord.Member, amount: int):
     await safe_send(ctx, f'✅ {member.mention} wallet set to **{fmt(amount)} {COIN}**.')
 
 @admin.command(name='reset')
+@commands.check(is_admin)
 async def admin_reset(ctx, member: discord.Member):
     await bot.db.reset_user(member.id); await safe_send(ctx, f'♻️ Reset {member.mention}.')
 
 @admin.command(name='giveitem')
+@commands.check(is_admin)
 async def admin_giveitem(ctx, member: discord.Member, item_id: str, quantity: int=1):
     if quantity<1: raise ValueError('Quantity must be positive.')
     await bot.db.add_item(member.id,item_id.lower(),quantity,'Admin Gift'); await safe_send(ctx, f'🎁 Gave **{quantity}× {item_id.lower()}** to {member.mention}.')
 
 @admin.command(name='removeitem')
+@commands.check(is_admin)
 async def admin_removeitem(ctx, member: discord.Member, item_id: str, quantity: int=1):
     if quantity<1: raise ValueError('Quantity must be positive.')
     await bot.db.remove_item(member.id,item_id.lower(),quantity); await safe_send(ctx, f'🗑️ Removed **{quantity}× {item_id.lower()}** from {member.mention}.')
 
 @admin.command(name='inspect')
+@commands.check(is_admin)
 async def admin_inspect(ctx, member: discord.Member):
     a=await account(member.id); await safe_send(ctx, embed=emb(f'🔎 {member.display_name}',f'Wallet **{fmt(a.wallet)}**\nBank **{fmt(a.bank)}**\nXP **{fmt(a.xp)}**\nLevel **{a.level}**\nEarned **{fmt(a.total_earned)}**\nSpent **{fmt(a.total_spent)}**'))
 
 @admin.command(name='reloadshop')
+@commands.check(is_admin)
 async def admin_reloadshop(ctx):
     await bot.db.seed(); await safe_send(ctx, '🛒 Shop catalog verified/reseeded.')
 
